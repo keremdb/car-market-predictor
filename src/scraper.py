@@ -3,105 +3,122 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import time
 import random
-import csv
-import os
 
-# CONFIGURATION
-# Pretend to be a real browser to avoid being blocked immediately
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
 }
 
-def get_soup(url):
+def get_listing_urls(model_url="https://bringatrailer.com/honda/s2000/"):
     """
-    Fetches the URL and returns a BeautifulSoup object.
-    Includes error handling for network issues.
+    Fetches the model page and extracts listing URLs.
     """
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        response.raise_for_status() # Raise error for 404/500 codes
-        return BeautifulSoup(response.content, 'lxml')
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching {url}: {e}")
-        return None
+    print(f"Connecting to {model_url}...")
+    response = requests.get(model_url, headers=HEADERS)
+    soup = BeautifulSoup(response.content, 'lxml')
+    
+    listing_urls = set()
+    
+    # BaT usually puts listings inside a 'div' with class 'listing-card' or similar.
+    # We will look for ANY link that contains '/listing/' to be safe.
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if '/listing/' in href and 'bringatrailer.com' in href:
+            clean_url = href.split('?')[0]
+            listing_urls.add(clean_url)
+            
+    # Convert to list and sort to keep order consistent
+    return sorted(list(listing_urls))
 
 def parse_listing(url):
     """
-    Extracts data from a SINGLE Bring a Trailer sold listing.
+    Extracts data from a SINGLE listing page.
     """
-    soup = get_soup(url)
-    if not soup:
-        return None
-
-    data = {'url': url}
-    
-    # 1. EXTRACT TITLE
     try:
-        data['title'] = soup.find('h1', class_='post-title').get_text(strip=True)
-    except AttributeError:
-        data['title'] = None
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(response.content, 'lxml')
+        
+        # CRITICAL FIX: Initialize dictionary with None to prevent KeyError
+        data = {
+            'url': url, 
+            'title': 'Unknown', 
+            'price': None, 
+            'sold_date': None,
+            'mileage': None
+        }
+        
+        # 1. Title
+        title_tag = soup.find('h1', class_='post-title')
+        if title_tag:
+            data['title'] = title_tag.get_text(strip=True)
 
-    # 2. EXTRACT SOLD PRICE
-    # BaT usually puts the price in a class like "info-value" inside the "listing-available-info" bar
-    try:
-        # Look for the 'Sold for' text and grab the bold text next to it
+        # 2. Price (The tricky part)
+        # BaT layout changes. We try multiple places.
         info_bar = soup.find('div', class_='listing-available-info')
         if info_bar:
-            price_text = info_bar.find('span', class_='info-value').get_text(strip=True)
-            # Clean string: "$35,000" -> 35000
-            data['price'] = int(price_text.replace('$', '').replace(',', ''))
-        else:
-            data['price'] = None
-    except (AttributeError, ValueError):
-        data['price'] = None
+            # Look for the bold value span
+            price_span = info_bar.find('span', class_='info-value')
+            if price_span:
+                price_text = price_span.get_text(strip=True)
+                # Clean "$35,000" -> 35000
+                if '$' in price_text:
+                    clean_price = price_text.replace('$', '').replace(',', '')
+                    if clean_price.isdigit():
+                        data['price'] = int(clean_price)
+        
+        # 3. Features (Mileage, etc.)
+        essentials = soup.find('div', class_='essentials')
+        if essentials:
+            for item in essentials.find_all('li'):
+                text = item.get_text(strip=True)
+                if 'Mileage' in text:
+                    data['mileage'] = text.replace('Mileage:', '').strip()
+                # Add other features here if you want
 
-    # 3. EXTRACT "BaT ESSENTIALS" (The rich feature data)
-    # These are usually in a <ul> list inside a div class "essentials"
-    essentials = soup.find('div', class_='essentials')
-    if essentials:
-        items = essentials.find_all('li')
-        for item in items:
-            text = item.get_text(strip=True)
-            # Text looks like: "Transmission: 6-Speed Manual"
-            if ':' in text:
-                key, value = text.split(':', 1)
-                data[key.strip()] = value.strip()
+        return data
 
-    return data
+    except Exception as e:
+        print(f"Failed to scrape {url}: {e}")
+        return None
 
 def main():
-    # TEST LIST: 3 actual sold listings (S2000s) to verify the code works
-    # In Week 2, you will replace this with a loop that generates these URLs automatically
-    test_urls = [
-        "https://bringatrailer.com/listing/2004-honda-s2000-112/",
-        "https://bringatrailer.com/listing/2008-honda-s2000-137/",
-        "https://bringatrailer.com/listing/2006-honda-s2000-155/"
-    ]
-
-    all_cars = []
-
-    print(f"Starting scrape of {len(test_urls)} cars...")
-
-    for url in test_urls:
-        print(f"Scraping: {url}...")
-        car_data = parse_listing(url)
-        
-        if car_data:
-            all_cars.append(car_data)
-            print(f" -> Success! Found: {car_data.get('title', 'Unknown')}")
-        
-        # POLITE DELAY: Wait 3-6 seconds between requests
-        time.sleep(random.uniform(3, 6))
-
-    # SAVE TO CSV
-    df = pd.DataFrame(all_cars)
+    # 1. Get URLs
+    all_urls = get_listing_urls("https://bringatrailer.com/honda/s2000/")
     
-    # Simple cleaning for the CSV (Handling missing columns gracefully)
-    output_file = 'bat_s2000_data.csv'
-    df.to_csv(output_file, index=False)
-    print(f"\nDone! Data saved to {output_file}")
-    print(df.head())
+    # If we still only find 2, we might need to change strategies, 
+    # but at least the code won't crash.
+    print(f"Found {len(all_urls)} potential car listings.")
+    
+    # Limit to 5 for testing
+    cars_to_scrape = all_urls[:5] 
+    
+    results = []
+    for i, url in enumerate(cars_to_scrape):
+        print(f"[{i+1}/{len(cars_to_scrape)}] Processing: {url}")
+        car_data = parse_listing(url)
+        if car_data:
+            print(f"   -> Found: {car_data['title']} | Price: {car_data['price']}")
+            results.append(car_data)
+        
+        time.sleep(2) # Respectful delay
+
+    # 2. Save to CSV (With Safety Check)
+    if results:
+        df = pd.DataFrame(results)
+        
+        # SAFETY CHECK: Only drop if the column actually exists
+        if 'price' in df.columns:
+            # Separate sold vs unsold
+            sold_df = df.dropna(subset=['price'])
+            print(f"\nSummary: Scraped {len(df)} cars. {len(sold_df)} have prices.")
+            
+            sold_df.to_csv('s2000_data.csv', index=False)
+            print("Saved s2000_data.csv")
+        else:
+            print("\nWARNING: No prices found in any listings. Check selector logic.")
+            # Save whatever we got anyway so you can inspect it
+            df.to_csv('s2000_debug.csv', index=False)
+    else:
+        print("No data collected.")
 
 if __name__ == "__main__":
     main()
